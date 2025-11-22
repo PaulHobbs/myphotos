@@ -259,6 +259,7 @@ func runReport(args []string) {
 	dbPtr := reportCmd.String("db", defaultDB, "Path to the sqlite database file")
 	verbosePtr := reportCmd.Bool("verbose", false, "Show full list of files")
 	vPtr := reportCmd.Bool("v", false, "Show full list of files (shorthand)")
+	wrongSizePtr := reportCmd.Bool("wrong_size", false, "Report files present on remote but with different size")
 	reportCmd.Parse(args)
 
 	isVerbose := *verbosePtr || *vPtr
@@ -268,6 +269,37 @@ func runReport(args []string) {
 		log.Fatalf("Failed to open DB: %v", err)
 	}
 	defer db.Close()
+
+	if *wrongSizePtr {
+		query := `
+			SELECT p1.local_path, p1.size, p2.remote_path, p2.size
+			FROM photos p1
+			JOIN photos p2 ON p1.filename = p2.filename
+			WHERE p1.local_path IS NOT NULL AND p1.local_path != ''
+			  AND (p1.remote_path IS NULL OR p1.remote_path = '')
+			  AND p2.remote_path IS NOT NULL AND p2.remote_path != ''
+		`
+		rows, err := db.Query(query)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rows.Close()
+
+		fmt.Println("--- Files with Name Match but Size Mismatch ---")
+		count := 0
+		for rows.Next() {
+			var lPath, rPath string
+			var lSize, rSize int64
+			if err := rows.Scan(&lPath, &lSize, &rPath, &rSize); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("Local:  %s (%d bytes)\nRemote: %s (%d bytes)\n\n", lPath, lSize, rPath, rSize)
+			count++
+		}
+		fmt.Printf("-----------------------------------------------\n")
+		fmt.Printf("Total Mismatches: %d\n", count)
+		return
+	}
 
 	// Query for files that are local (backed up?) but NOT on remote.
 	// We check if local_path is set and remote_path is NULL or empty.
