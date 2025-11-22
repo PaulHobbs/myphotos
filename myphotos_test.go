@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/zip"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -149,5 +151,64 @@ func assertFileState(t *testing.T, db *sql.DB, filename string, size int64, expe
 	}
 	if onRemote != expectRemote {
 		t.Errorf("File %s: expected on_remote=%v, got %v", filename, expectRemote, onRemote)
+	}
+}
+
+func TestZipMissing(t *testing.T) {
+	db, dbPath := setupTestDB(t)
+	defer os.Remove(dbPath)
+	defer db.Close()
+
+	// Create a fake home directory
+	fakeHome, err := os.MkdirTemp("", "fake_home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fakeHome)
+
+	// Create a dummy file that is "missing" from remote
+	relPath := "Pictures/vacation/missing.jpg"
+	fullPath := filepath.Join(fakeHome, relPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("image data")
+	if err := os.WriteFile(fullPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add to DB as a local file
+	if err := upsertLocal(db, "missing.jpg", int64(len(content)), fullPath); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := filepath.Join(fakeHome, "output.zip")
+	if err := zipMissingFiles(db, zipPath, fakeHome); err != nil {
+		t.Fatalf("zipMissingFiles failed: %v", err)
+	}
+
+	// Verify Zip contents
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("Failed to open zip: %v", err)
+	}
+	defer r.Close()
+
+	if len(r.File) != 1 {
+		t.Errorf("Expected 1 file in zip, got %d", len(r.File))
+	} else {
+		f := r.File[0]
+		// We expect the path in zip to be relative to home, and use forward slashes
+		expectedName := "Pictures/vacation/missing.jpg"
+		if f.Name != expectedName {
+			t.Errorf("Expected zip entry name %s, got %s", expectedName, f.Name)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		// We could verify content here if needed
 	}
 }

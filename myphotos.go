@@ -1,11 +1,13 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -348,11 +350,101 @@ func runReport(args []string) {
 	}
 }
 
+func runZipMissing(args []string) {
+	defaultDB := getDefaultDBPath()
+	zipCmd := flag.NewFlagSet("zip-missing", flag.ExitOnError)
+	outputPtr := zipCmd.String("output", "missing_photos.zip", "Output zip file path")
+	dbPtr := zipCmd.String("db", defaultDB, "Path to the sqlite database file")
+
+	zipCmd.Parse(args)
+
+	db, err := initDB(*dbPtr)
+	if err != nil {
+		log.Fatalf("Failed to open DB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT local_path FROM photos WHERE local_path IS NOT NULL AND local_path != '' AND (remote_path IS NULL OR remote_path = '')")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatalf("Could not get current user: %v", err)
+	}
+	homeDir := usr.HomeDir
+
+	if err := zipMissingFiles(db, *outputPtr, homeDir); err != nil {
+		log.Fatalf("Error zipping files: %v", err)
+	}
+}
+
+func zipMissingFiles(db *sql.DB, outputPtr string, homeDir string) error {
+	rows, err := db.Query("SELECT local_path FROM photos WHERE local_path IS NOT NULL AND local_path != '' AND (remote_path IS NULL OR remote_path = '')")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	outFile, err := os.Create(outputPtr)
+	if err != nil {
+		return fmt.Errorf("failed to create zip file: %v", err)
+	}
+	defer outFile.Close()
+
+	w := zip.NewWriter(outFile)
+	defer w.Close()
+
+	count := 0
+	fmt.Printf("Creating zip archive %s...\n", outputPtr)
+
+	for rows.Next() {
+		var localPath string
+		if err := rows.Scan(&localPath); err != nil {
+			log.Printf("Error scanning row: %v", err)
+			continue
+		}
+
+		relPath, err := filepath.Rel(homeDir, localPath)
+		if err != nil || strings.HasPrefix(relPath, "..") {
+			vol := filepath.VolumeName(localPath)
+			relPath = strings.TrimPrefix(localPath[len(vol):], string(os.PathSeparator))
+		}
+
+		f, err := os.Open(localPath)
+		if err != nil {
+			log.Printf("Warning: Could not open %s: %v", localPath, err)
+			continue
+		}
+
+		wCreate, err := w.Create(filepath.ToSlash(relPath))
+		if err != nil {
+			f.Close()
+			log.Printf("Warning: Could not create zip entry for %s: %v", localPath, err)
+			continue
+		}
+
+		if _, err := io.Copy(wCreate, f); err != nil {
+			log.Printf("Warning: Could not copy content for %s: %v", localPath, err)
+		}
+		f.Close()
+		count++
+		if count%50 == 0 {
+			fmt.Printf("\rZipped %d files...", count)
+		}
+	}
+	fmt.Printf("\nDone. Zipped %d files to %s.\n", count, outputPtr)
+	return nil
+}
+
 func printHelp() {
 	fmt.Println("Usage: go run myphotos.go <command> [flags]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  add     Scan and add files to the database")
 	fmt.Println("  report  Generate a report of missing files")
+	fmt.Println("  zip-missing Create a zip file of missing photos")
 	fmt.Println("  help    Show this help message")
 }
 
@@ -372,6 +464,8 @@ func main() {
 		runAdd(os.Args[2:], cfg)
 	case "report":
 		runReport(os.Args[2:])
+	case "zip-missing":
+		runZipMissing(os.Args[2:])
 	case "help", "--help", "-h":
 		printHelp()
 	default:
