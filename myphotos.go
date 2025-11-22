@@ -279,6 +279,14 @@ func runReport(args []string) {
 	fmt.Printf("Total Missing from Remote: %d\n", count)
 }
 
+func printHelp() {
+	fmt.Println("Usage: go run myphotos.go <command> [flags]")
+	fmt.Println("\nCommands:")
+	fmt.Println("  add     Scan and add files to the database")
+	fmt.Println("  report  Generate a report of missing files")
+	fmt.Println("  help    Show this help message")
+}
+
 func main() {
 	cfg, err := loadOrCreateConfig()
 	if err != nil {
@@ -286,8 +294,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run myphotos.go <command> [flags]")
-		fmt.Println("Commands: add, report")
+		printHelp()
 		os.Exit(1)
 	}
 
@@ -296,8 +303,11 @@ func main() {
 		runAdd(os.Args[2:], cfg)
 	case "report":
 		runReport(os.Args[2:])
+	case "help", "--help", "-h":
+		printHelp()
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
+		printHelp()
 		os.Exit(1)
 	}
 }
