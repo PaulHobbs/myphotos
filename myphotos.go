@@ -29,6 +29,14 @@ func getDefaultConfig() Config {
 	}
 }
 
+func getDefaultDBPath() string {
+	usr, err := user.Current()
+	if err != nil {
+		return "db.sqlite"
+	}
+	return filepath.Join(usr.HomeDir, ".config", "myphotos", "db.sqlite")
+}
+
 // --- Database Logic ---
 
 func initDB(dbPath string) (*sql.DB, error) {
@@ -131,10 +139,11 @@ func isExtensionAllowed(path string, extensions []string) bool {
 }
 
 func runAdd(args []string, cfg *Config) {
+	defaultDB := getDefaultDBPath()
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 	remotePtr := addCmd.String("remote", "", "The remote server address (e.g. user@192.168.1.100). If empty, scans local.")
 	pathPtr := addCmd.String("path", "", "The directory path to scan")
-	dbPtr := addCmd.String("db", "db.sql", "Path to the sqlite database file")
+	dbPtr := addCmd.String("db", defaultDB, "Path to the sqlite database file")
 
 	addCmd.Parse(args)
 
@@ -238,8 +247,9 @@ func runAdd(args []string, cfg *Config) {
 }
 
 func runReport(args []string) {
+	defaultDB := getDefaultDBPath()
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
-	dbPtr := reportCmd.String("db", "db.sql", "Path to the sqlite database file")
+	dbPtr := reportCmd.String("db", defaultDB, "Path to the sqlite database file")
 	reportCmd.Parse(args)
 
 	db, err := initDB(*dbPtr)
