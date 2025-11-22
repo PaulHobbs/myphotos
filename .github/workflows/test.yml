@@ -1,0 +1,30 @@
+name: Go Tests
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21' # Or whichever version you are using locally
+
+    - name: Install dependencies
+      run: |
+        go mod download
+        # go-sqlite3 requires CGO. Ubuntu runners have GCC installed by default.
+    
+    - name: Run Tests
+      # CGO_ENABLED=1 is usually default, but we force it just in case for sqlite3
+      run: CGO_ENABLED=1 go test -v ./...
+
