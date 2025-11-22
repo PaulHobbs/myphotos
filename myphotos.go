@@ -167,7 +167,7 @@ func runAdd(args []string, cfg *Config) {
 		
 		// We construct a find command to run over SSH.
 		// We use -printf to get filename, size, and full path separated by tabs.
-		sshCmd := exec.Command("ssh", *remotePtr, "find", *pathPtr, "-type", "f", "-printf", "%f\t%s\t%p\n")
+		sshCmd := exec.Command("ssh", *remotePtr, "find", *pathPtr, "-type", "f", "-printf", "'%f\t%s\t%p\n'")
 		
 		// Capture output
 		var out bytes.Buffer
