@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -46,12 +48,14 @@ func initDB(dbPath string) (*sql.DB, error) {
 	}
 
 	// Create table if it doesn't exist
-	// We use the relative path as the PRIMARY KEY to identify the file
+	// We use filename + size as the unique identifier
 	query := `
-	CREATE TABLE IF NOT EXISTS files (
-		rel_path TEXT PRIMARY KEY,
-		on_local BOOLEAN DEFAULT 0,
-		on_remote BOOLEAN DEFAULT 0
+	CREATE TABLE IF NOT EXISTS photos (
+		filename TEXT,
+		size INTEGER,
+		local_path TEXT,
+		remote_path TEXT,
+		PRIMARY KEY (filename, size)
 	);`
 
 	_, err = db.Exec(query)
@@ -62,23 +66,21 @@ func initDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func upsertLocal(db *sql.DB, relPath string) error {
-	// Insert: set on_local=1. On Conflict: update on_local=1 (leave on_remote alone)
+func upsertLocal(db *sql.DB, filename string, size int64, path string) error {
 	query := `
-	INSERT INTO files (rel_path, on_local, on_remote) VALUES (?, 1, 0)
-	ON CONFLICT(rel_path) DO UPDATE SET on_local=1;
+	INSERT INTO photos (filename, size, local_path) VALUES (?, ?, ?)
+	ON CONFLICT(filename, size) DO UPDATE SET local_path=excluded.local_path;
 	`
-	_, err := db.Exec(query, relPath)
+	_, err := db.Exec(query, filename, size, path)
 	return err
 }
 
-func upsertRemote(db *sql.DB, relPath string) error {
-	// Insert: set on_remote=1. On Conflict: update on_remote=1 (leave on_local alone)
+func upsertRemote(db *sql.DB, filename string, size int64, path string) error {
 	query := `
-	INSERT INTO files (rel_path, on_local, on_remote) VALUES (?, 0, 1)
-	ON CONFLICT(rel_path) DO UPDATE SET on_remote=1;
+	INSERT INTO photos (filename, size, remote_path) VALUES (?, ?, ?)
+	ON CONFLICT(filename, size) DO UPDATE SET remote_path=excluded.remote_path;
 	`
-	_, err := db.Exec(query, relPath)
+	_, err := db.Exec(query, filename, size, path)
 	return err
 }
 
@@ -163,9 +165,9 @@ func runAdd(args []string, cfg *Config) {
 	if *remotePtr != "" {
 		fmt.Printf("Scanning REMOTE [%s] at path [%s]...\n", *remotePtr, *pathPtr)
 		
-		// We construct a find command to run over SSH. 
-		// We use -type f to only get files.
-		sshCmd := exec.Command("ssh", *remotePtr, "find", *pathPtr, "-type", "f")
+		// We construct a find command to run over SSH.
+		// We use -printf to get filename, size, and full path separated by tabs.
+		sshCmd := exec.Command("ssh", *remotePtr, "find", *pathPtr, "-type", "f", "-printf", "%f\t%s\t%p\n")
 		
 		// Capture output
 		var out bytes.Buffer
@@ -183,20 +185,24 @@ func runAdd(args []string, cfg *Config) {
 		tx, _ := db.Begin() // Use transaction for speed
 
 		for scanner.Scan() {
-			fullPath := scanner.Text()
-			if !isExtensionAllowed(fullPath, cfg.Extensions) {
+			line := scanner.Text()
+			parts := strings.Split(line, "\t")
+			if len(parts) != 3 {
+				continue
+			}
+			name := parts[0]
+			size, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			fullPath := parts[2]
+
+			if !isExtensionAllowed(name, cfg.Extensions) {
 				continue
 			}
 
-			// Calculate relative path to store in DB
-			relPath, err := filepath.Rel(*pathPtr, fullPath)
-			if err != nil {
-				// If rel path fails (weird mount issues), fallback to filename
-				relPath = filepath.Base(fullPath)
-			}
-
-			if err := upsertRemote(db, relPath); err != nil {
-				log.Printf("Error inserting remote file %s: %v", relPath, err)
+			if err := upsertRemote(db, name, size, fullPath); err != nil {
+				log.Printf("Error inserting remote file %s: %v", name, err)
 			}
 			count++
 			if count%100 == 0 {
@@ -223,12 +229,13 @@ func runAdd(args []string, cfg *Config) {
 				return nil
 			}
 
-			relPath, err := filepath.Rel(*pathPtr, path)
+			info, err := d.Info()
 			if err != nil {
 				return err
 			}
+			absPath, _ := filepath.Abs(path)
 
-			if err := upsertLocal(db, relPath); err != nil {
+			if err := upsertLocal(db, d.Name(), info.Size(), absPath); err != nil {
 				return err
 			}
 			
@@ -250,7 +257,11 @@ func runReport(args []string) {
 	defaultDB := getDefaultDBPath()
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	dbPtr := reportCmd.String("db", defaultDB, "Path to the sqlite database file")
+	verbosePtr := reportCmd.Bool("verbose", false, "Show full list of files")
+	vPtr := reportCmd.Bool("v", false, "Show full list of files (shorthand)")
 	reportCmd.Parse(args)
+
+	isVerbose := *verbosePtr || *vPtr
 
 	db, err := initDB(*dbPtr)
 	if err != nil {
@@ -258,25 +269,51 @@ func runReport(args []string) {
 	}
 	defer db.Close()
 
-	// Query for files that are local (backed up?) but NOT on remote, or vice versa.
-	// Usually, backup verification means "Show me what is Local but NOT Remote"
+	// Query for files that are local (backed up?) but NOT on remote.
+	// We check if local_path is set and remote_path is NULL or empty.
 	
-	rows, err := db.Query("SELECT rel_path FROM files WHERE on_local = 1 AND on_remote = 0")
+	rows, err := db.Query("SELECT local_path FROM photos WHERE local_path IS NOT NULL AND local_path != '' AND (remote_path IS NULL OR remote_path = '')")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer rows.Close()
 
-	fmt.Println("--- Files on Local Machine but MISSING from Remote (Backup needed) ---")
-	count := 0
-	for rows.Next() {
-		var p string
-		rows.Scan(&p)
-		fmt.Println(p)
-		count++
+	if isVerbose {
+		fmt.Println("--- Files on Local Machine but MISSING from Remote (Backup needed) ---")
+		count := 0
+		for rows.Next() {
+			var p string
+			rows.Scan(&p)
+			fmt.Println(p)
+			count++
+		}
+		fmt.Printf("---------------------------------------------------------------------\n")
+		fmt.Printf("Total Missing from Remote: %d\n", count)
+	} else {
+		summary := make(map[string]int)
+		count := 0
+		for rows.Next() {
+			var p string
+			rows.Scan(&p)
+			// Group by directory
+			dir := filepath.Dir(p)
+			summary[dir]++
+			count++
+		}
+
+		fmt.Println("--- Summary of Missing Files (by Directory) ---")
+		var keys []string
+		for k := range summary {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("%s: %d\n", k, summary[k])
+		}
+		fmt.Printf("---------------------------------------------------------\n")
+		fmt.Printf("Total Missing from Remote: %d\n", count)
+		fmt.Println("(Use -v or --verbose to see full file list)")
 	}
-	fmt.Printf("---------------------------------------------------------------------\n")
-	fmt.Printf("Total Missing from Remote: %d\n", count)
 }
 
 func printHelp() {

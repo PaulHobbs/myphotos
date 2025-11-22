@@ -58,31 +58,33 @@ func TestDatabaseUpsertFlow(t *testing.T) {
 	defer db.Close()
 
 	// 1. Add a file found LOCALLY
-	relPath := "2023/vacation/img1.jpg"
-	if err := upsertLocal(db, relPath); err != nil {
+	filename := "img1.jpg"
+	size := int64(1024)
+	localPath := "/local/2023/vacation/img1.jpg"
+	if err := upsertLocal(db, filename, size, localPath); err != nil {
 		t.Fatalf("upsertLocal failed: %v", err)
 	}
 
 	// Verify state: Local=1, Remote=0
-	assertFileState(t, db, relPath, true, false)
+	assertFileState(t, db, filename, size, true, false)
 
 	// 2. Add the SAME file found REMOTELY (This simulates a backup existing)
 	// This should update the row, not error out, and not overwrite on_local
-	if err := upsertRemote(db, relPath); err != nil {
+	remotePath := "/remote/backup/img1.jpg"
+	if err := upsertRemote(db, filename, size, remotePath); err != nil {
 		t.Fatalf("upsertRemote failed: %v", err)
 	}
 
 	// Verify state: Local=1, Remote=1
-	assertFileState(t, db, relPath, true, true)
+	assertFileState(t, db, filename, size, true, true)
 
 	// 3. Add a NEW file found REMOTELY only
-	remoteOnlyPath := "2022/old/img2.jpg"
-	if err := upsertRemote(db, remoteOnlyPath); err != nil {
+	if err := upsertRemote(db, "img2.jpg", 2048, "/remote/old/img2.jpg"); err != nil {
 		t.Fatalf("upsertRemote new file failed: %v", err)
 	}
 
 	// Verify state: Local=0, Remote=1
-	assertFileState(t, db, remoteOnlyPath, false, true)
+	assertFileState(t, db, "img2.jpg", 2048, false, true)
 }
 
 func TestReportingLogic(t *testing.T) {
@@ -95,13 +97,13 @@ func TestReportingLogic(t *testing.T) {
 	// File B: Remote only (Maybe deleted locally, or archived)
 	// File C: Both (Safe)
 
-	upsertLocal(db, "fileA.jpg")
-	upsertRemote(db, "fileB.jpg")
-	upsertLocal(db, "fileC.jpg")
-	upsertRemote(db, "fileC.jpg")
+	upsertLocal(db, "fileA.jpg", 100, "/local/fileA.jpg")
+	upsertRemote(db, "fileB.jpg", 200, "/remote/fileB.jpg")
+	upsertLocal(db, "fileC.jpg", 300, "/local/fileC.jpg")
+	upsertRemote(db, "fileC.jpg", 300, "/remote/fileC.jpg")
 
 	// Query for "Missing from Remote" (The logic used in runReport)
-	rows, err := db.Query("SELECT rel_path FROM files WHERE on_local = 1 AND on_remote = 0")
+	rows, err := db.Query("SELECT local_path FROM photos WHERE local_path IS NOT NULL AND (remote_path IS NULL OR remote_path = '')")
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -118,32 +120,34 @@ func TestReportingLogic(t *testing.T) {
 	if len(results) != 1 {
 		t.Errorf("Expected 1 missing file, got %d", len(results))
 	}
-	if len(results) > 0 && results[0] != "fileA.jpg" {
-		t.Errorf("Expected fileA.jpg to be missing, got %s", results[0])
+	if len(results) > 0 && results[0] != "/local/fileA.jpg" {
+		t.Errorf("Expected /local/fileA.jpg to be missing, got %s", results[0])
 	}
 }
 
 // --- Helper Functions ---
 
-func assertFileState(t *testing.T, db *sql.DB, relPath string, expectLocal, expectRemote bool) {
+func assertFileState(t *testing.T, db *sql.DB, filename string, size int64, expectLocal, expectRemote bool) {
 	t.Helper()
-	var onLocal, onRemote bool
+	var localPath, remotePath sql.NullString
 	
-	// sqlite stores booleans as integers (0 or 1)
-	row := db.QueryRow("SELECT on_local, on_remote FROM files WHERE rel_path = ?", relPath)
-	err := row.Scan(&onLocal, &onRemote)
+	row := db.QueryRow("SELECT local_path, remote_path FROM photos WHERE filename = ? AND size = ?", filename, size)
+	err := row.Scan(&localPath, &remotePath)
 	
 	if err == sql.ErrNoRows {
-		t.Fatalf("File %s not found in DB", relPath)
+		t.Fatalf("File %s not found in DB", filename)
 	}
 	if err != nil {
 		t.Fatalf("Error scanning row: %v", err)
 	}
 
+	onLocal := localPath.Valid && localPath.String != ""
+	onRemote := remotePath.Valid && remotePath.String != ""
+
 	if onLocal != expectLocal {
-		t.Errorf("File %s: expected on_local=%v, got %v", relPath, expectLocal, onLocal)
+		t.Errorf("File %s: expected on_local=%v, got %v", filename, expectLocal, onLocal)
 	}
 	if onRemote != expectRemote {
-		t.Errorf("File %s: expected on_remote=%v, got %v", relPath, expectRemote, onRemote)
+		t.Errorf("File %s: expected on_remote=%v, got %v", filename, expectRemote, onRemote)
 	}
 }
